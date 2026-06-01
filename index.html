@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Login - Sistem Monitoring Hasil Stamping Box</title>
+  <meta name="description" content="Sistem Monitoring Hasil Stamping Box - Dashboard IoT untuk monitoring produksi real-time">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div class="login-wrap" id="loginWrap">
+    <div class="login-box">
+      <div class="login-logo">
+        <div class="logo-icon">
+          <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+            <rect width="48" height="48" rx="12" fill="url(#grad1)"/>
+            <path d="M14 24L22 32L34 16" stroke="white" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <defs><linearGradient id="grad1" x1="0" y1="0" x2="48" y2="48"><stop stop-color="#11d9e7"/><stop offset="1" stop-color="#0066ff"/></linearGradient></defs>
+          </svg>
+        </div>
+      </div>
+      <h1>Login Dashboard</h1>
+      <p class="login-subtitle">Masukkan username dan password untuk mengakses sistem monitoring.</p>
+      <form id="loginForm" onsubmit="return handleLogin(event)">
+        <div class="input-group">
+          <label for="username">Username</label>
+          <input type="text" id="username" name="username" placeholder="Masukkan username" required autocomplete="username">
+        </div>
+        <div class="input-group">
+          <label for="password">Password</label>
+          <div class="password-wrap">
+            <input type="password" id="password" name="password" placeholder="Masukkan password" required autocomplete="current-password">
+            <button type="button" class="toggle-pw" onclick="togglePassword()" id="togglePwBtn">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            </button>
+          </div>
+        </div>
+        <div id="loginError" class="login-error" style="display:none;"></div>
+        <button class="btn btn-primary btn-full" type="submit" id="loginBtn">
+          <span id="loginText">LOGIN</span>
+          <span id="loginSpinner" class="spinner" style="display:none;"></span>
+        </button>
+      </form>
+      <div class="login-footer">
+        <p>Sistem Monitoring Hasil Stamping Box &copy; 2026</p>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/firebase-config.js"></script>
+  <script src="js/auth.js"></script>
+</body>
+</html>
