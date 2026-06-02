@@ -13,12 +13,20 @@ let latestSnapshot = null;
 let dailyReportSnapshot = null;
 let settingsSnapshot = null;
 
+// Smooth display timer untuk runtime/downtime pada halaman histori.
+// Data utama tetap dari ESP32/Firebase, web hanya menghaluskan tampilan antar-refresh.
+let historySmoothRuntimeSec = 0;
+let historySmoothDowntimeSec = 0;
+let historySmoothMachineStatus = 'STOP';
+let historySmoothTimerStarted = false;
+
 document.addEventListener('DOMContentLoaded', () => {
   if (!requireAuth()) return;
   updateNavUser();
   setupHistoryRole();
   initHistoryCycleChart();
   startHistoryListener();
+  startHistorySmoothRuntimeDowntimeTimer();
 });
 
 function setupHistoryRole() {
@@ -76,6 +84,40 @@ function parseTimeToSeconds(timeStr) {
   const parts = String(timeStr).split(':').map(v => parseInt(v, 10));
   if (parts.length !== 3 || parts.some(Number.isNaN)) return 0;
   return parts[0] * 3600 + parts[1] * 60 + parts[2];
+}
+
+
+function formatSeconds(totalSec) {
+  const sec = Math.max(0, Math.floor(Number(totalSec) || 0));
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  return String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
+}
+
+function renderHistorySmoothRuntimeDowntime() {
+  const runtimeEl = document.getElementById('runtimeHVal');
+  const downtimeEl = document.getElementById('downtimeHVal');
+  if (runtimeEl) runtimeEl.innerText = formatSeconds(historySmoothRuntimeSec);
+  if (downtimeEl) downtimeEl.innerText = formatSeconds(historySmoothDowntimeSec);
+}
+
+function syncHistorySmoothRuntimeDowntime(source) {
+  if (!source) return;
+  historySmoothRuntimeSec = parseTimeToSeconds(getField(source, ['runtime'], '00:00:00'));
+  historySmoothDowntimeSec = parseTimeToSeconds(getField(source, ['downtime'], '00:00:00'));
+  historySmoothMachineStatus = String(getField(source, ['final_machine_status', 'machine_status', 'status_machine'], 'STOP')).toUpperCase();
+  renderHistorySmoothRuntimeDowntime();
+}
+
+function startHistorySmoothRuntimeDowntimeTimer() {
+  if (historySmoothTimerStarted) return;
+  historySmoothTimerStarted = true;
+  setInterval(() => {
+    if (historySmoothMachineStatus === 'RUN') historySmoothRuntimeSec++;
+    else historySmoothDowntimeSec++;
+    renderHistorySmoothRuntimeDowntime();
+  }, 1000);
 }
 
 function parseClockToSeconds(timeStr, endOfMinute = false) {
@@ -289,8 +331,7 @@ function updateHistorySummary(latest, report, entries, dateKey, settings, useFil
   setText('totalProdVal', total);
   setText('pctGoodVal', pctGood);
   setText('pctNGVal', pctNG);
-  setText('runtimeHVal', getField(source, ['runtime'], '00:00:00'));
-  setText('downtimeHVal', getField(source, ['downtime'], '00:00:00'));
+  syncHistorySmoothRuntimeDowntime(source);
 
   const w = getField(settings, ['warning_threshold'], getField(source, ['warning_threshold', 'threshold_warning'], 10));
   const c = getField(settings, ['critical_threshold'], getField(source, ['critical_threshold', 'threshold_critical'], 20));
