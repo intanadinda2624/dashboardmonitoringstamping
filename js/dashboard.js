@@ -10,56 +10,16 @@ let pollInterval = null;
 let eventLogLoadedDate = null;
 
 // Smooth display timer: data asli tetap dari ESP32/Firebase, web hanya menghaluskan tampilan.
-// Versi monotonic: tampilan tidak boleh mundur karena Firebase/REST kadang telat mengirim nilai lama.
-let smoothRuntimeBaseSec = 0;
-let smoothDowntimeBaseSec = 0;
-let smoothMachineStatus = 'STOP';
-let smoothBaseMs = Date.now();
-let smoothTimerStarted = false;
-let smoothDateKey = '';
-let smoothLastTotalCount = 0;
-
-// Initialize dashboard
-document.addEventListener('DOMContentLoaded', () => {
-  if (!requireAuth()) return;
-  updateNavUser();
-  setupRolePermissions();
-  initCycleChart();
-  startRealtimeListener();
-  startSmoothRuntimeDowntimeTimer();
-});
-
-function getDateKey(date = new Date()) {
-  return date.toLocaleDateString('id-ID', { day:'2-digit', month:'2-digit', year:'numeric' }).replace(/\//g, '-');
-}
-
-function getTimeText(date = new Date()) {
-  return date.toLocaleTimeString('id-ID', { hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false });
-}
-
-function getTimestamp(date = new Date()) {
-  return `${getDateKey(date)} ${getTimeText(date)}`;
-}
-
-function sanitizeFirebaseKey(key) {
-  return String(key || getDateKey()).replace(/[.#$\[\]/]/g, '-');
-}
-
-function getField(obj, names, fallback = '-') {
-  if (!obj) return fallback;
-  for (const name of names) {
-    if (obj[name] !== undefined && obj[name] !== null && obj[name] !== '') return obj[name];
-  }
-  return fallback;
-}
-
-function parseTimeToSeconds(timeStr) {
-  if (!timeStr || timeStr === '-' || timeStr === '00:00:00') return 0;
-  const parts = String(timeStr).split(':').map(v => parseInt(v, 10));
-  if (parts.length !== 3 || parts.some(Number.isNaN)) return 0;
-  return parts[0] * 3600 + parts[1] * 60 + parts[2];
-}
-
+// Versi stabil: setelah halaman menerima nilai awal dari Firebase, tampilan berjalan lokal per detik.
+// Update Firebase tidak boleh membuat angka mundur atau meloncat, kecuali tanggal berganti/reset counter.
+let displayRuntimeSec = 0;
+let displayDowntimeSec = 0;
+let displayMachineStatus = 'STOP';
+let displayInitialized = false;
+let displayDateKey = '';
+let displayLastTotalCount = 0;
+let displayLastTickMs = Date.now();
+let displayTimerStarted = false;
 
 function formatSeconds(totalSec) {
   const sec = Math.max(0, Math.floor(Number(totalSec) || 0));
@@ -69,20 +29,32 @@ function formatSeconds(totalSec) {
   return String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
 }
 
-function getSmoothRuntimeDowntimeDisplay() {
-  const elapsed = Math.max(0, Math.floor((Date.now() - smoothBaseMs) / 1000));
-  return {
-    runtime: smoothRuntimeBaseSec + (smoothMachineStatus === 'RUN' ? elapsed : 0),
-    downtime: smoothDowntimeBaseSec + (smoothMachineStatus === 'RUN' ? 0 : elapsed)
-  };
-}
-
 function renderSmoothRuntimeDowntime() {
-  const display = getSmoothRuntimeDowntimeDisplay();
   const runtimeEl = document.getElementById('runtimeVal');
   const downtimeEl = document.getElementById('downtimeVal');
-  if (runtimeEl) runtimeEl.innerText = formatSeconds(display.runtime);
-  if (downtimeEl) downtimeEl.innerText = formatSeconds(display.downtime);
+  if (runtimeEl) runtimeEl.innerText = formatSeconds(displayRuntimeSec);
+  if (downtimeEl) downtimeEl.innerText = formatSeconds(displayDowntimeSec);
+}
+
+function tickSmoothRuntimeDowntime() {
+  const now = Date.now();
+  if (!displayInitialized) {
+    displayLastTickMs = now;
+    return;
+  }
+
+  const elapsedSec = Math.floor((now - displayLastTickMs) / 1000);
+  if (elapsedSec <= 0) return;
+
+  displayLastTickMs += elapsedSec * 1000;
+
+  if (displayMachineStatus === 'RUN') {
+    displayRuntimeSec += elapsedSec;
+  } else {
+    displayDowntimeSec += elapsedSec;
+  }
+
+  renderSmoothRuntimeDowntime();
 }
 
 function syncSmoothRuntimeDowntime(runtime, downtime, machineStatus, dateKey, totalCount) {
@@ -91,31 +63,35 @@ function syncSmoothRuntimeDowntime(runtime, downtime, machineStatus, dateKey, to
   const nextStatus = String(machineStatus || 'STOP').toUpperCase();
   const nextDateKey = String(dateKey || getDateKey()).replace(/\//g, '-');
   const nextTotal = parseInt(totalCount, 10) || 0;
-  const current = getSmoothRuntimeDowntimeDisplay();
+  const resetDetected = displayInitialized && ((displayDateKey && nextDateKey !== displayDateKey) || (nextTotal < displayLastTotalCount));
 
-  // Kalau hari berganti atau counter di-reset, nilai boleh turun ke 0.
-  const allowReset = (smoothDateKey && nextDateKey !== smoothDateKey) || (nextTotal < smoothLastTotalCount);
-
-  if (allowReset) {
-    smoothRuntimeBaseSec = parsedRuntime;
-    smoothDowntimeBaseSec = parsedDowntime;
+  if (!displayInitialized || resetDetected) {
+    displayRuntimeSec = parsedRuntime;
+    displayDowntimeSec = parsedDowntime;
+    displayInitialized = true;
+    displayLastTickMs = Date.now();
   } else {
-    // Jika Firebase mengirim nilai lama/terlambat, jangan biarkan tampilan mundur.
-    smoothRuntimeBaseSec = Math.max(parsedRuntime, current.runtime);
-    smoothDowntimeBaseSec = Math.max(parsedDowntime, current.downtime);
+    // Jangan pernah mundur. Jangan juga melompat mengikuti data Firebase yang telat/bertumpuk.
+    // Koreksi kecil 0–1 detik masih diizinkan agar tetap sinkron halus.
+    if (parsedRuntime > displayRuntimeSec && parsedRuntime - displayRuntimeSec <= 1) {
+      displayRuntimeSec = parsedRuntime;
+    }
+    if (parsedDowntime > displayDowntimeSec && parsedDowntime - displayDowntimeSec <= 1) {
+      displayDowntimeSec = parsedDowntime;
+    }
   }
 
-  smoothMachineStatus = nextStatus;
-  smoothDateKey = nextDateKey;
-  smoothLastTotalCount = nextTotal;
-  smoothBaseMs = Date.now();
+  displayMachineStatus = nextStatus;
+  displayDateKey = nextDateKey;
+  displayLastTotalCount = nextTotal;
   renderSmoothRuntimeDowntime();
 }
 
 function startSmoothRuntimeDowntimeTimer() {
-  if (smoothTimerStarted) return;
-  smoothTimerStarted = true;
-  setInterval(renderSmoothRuntimeDowntime, 1000);
+  if (displayTimerStarted) return;
+  displayTimerStarted = true;
+  displayLastTickMs = Date.now();
+  setInterval(tickSmoothRuntimeDowntime, 250);
 }
 
 function parseCycleTimeSeconds(value, runtime, total) {
