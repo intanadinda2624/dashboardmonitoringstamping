@@ -9,6 +9,12 @@ let cycleLabels = [];
 let pollInterval = null;
 let eventLogLoadedDate = null;
 
+// Smooth display timer: data asli tetap dari ESP32/Firebase, web hanya menghaluskan tampilan.
+let smoothRuntimeSec = 0;
+let smoothDowntimeSec = 0;
+let smoothMachineStatus = 'STOP';
+let smoothTimerStarted = false;
+
 // Initialize dashboard
 document.addEventListener('DOMContentLoaded', () => {
   if (!requireAuth()) return;
@@ -16,6 +22,7 @@ document.addEventListener('DOMContentLoaded', () => {
   setupRolePermissions();
   initCycleChart();
   startRealtimeListener();
+  startSmoothRuntimeDowntimeTimer();
 });
 
 function getDateKey(date = new Date()) {
@@ -47,6 +54,39 @@ function parseTimeToSeconds(timeStr) {
   const parts = String(timeStr).split(':').map(v => parseInt(v, 10));
   if (parts.length !== 3 || parts.some(Number.isNaN)) return 0;
   return parts[0] * 3600 + parts[1] * 60 + parts[2];
+}
+
+
+function formatSeconds(totalSec) {
+  const sec = Math.max(0, Math.floor(Number(totalSec) || 0));
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  return String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
+}
+
+function renderSmoothRuntimeDowntime() {
+  const runtimeEl = document.getElementById('runtimeVal');
+  const downtimeEl = document.getElementById('downtimeVal');
+  if (runtimeEl) runtimeEl.innerText = formatSeconds(smoothRuntimeSec);
+  if (downtimeEl) downtimeEl.innerText = formatSeconds(smoothDowntimeSec);
+}
+
+function syncSmoothRuntimeDowntime(runtime, downtime, machineStatus) {
+  smoothRuntimeSec = parseTimeToSeconds(runtime);
+  smoothDowntimeSec = parseTimeToSeconds(downtime);
+  smoothMachineStatus = String(machineStatus || 'STOP').toUpperCase();
+  renderSmoothRuntimeDowntime();
+}
+
+function startSmoothRuntimeDowntimeTimer() {
+  if (smoothTimerStarted) return;
+  smoothTimerStarted = true;
+  setInterval(() => {
+    if (smoothMachineStatus === 'RUN') smoothRuntimeSec++;
+    else smoothDowntimeSec++;
+    renderSmoothRuntimeDowntime();
+  }, 1000);
 }
 
 function parseCycleTimeSeconds(value, runtime, total) {
@@ -193,8 +233,7 @@ function updateDashboardUI(data, settings) {
   setText('totalVal', total);
   setText('percentGoodVal', goodPct);
   setText('percentNGVal', ngPct);
-  setText('runtimeVal', runtime);
-  setText('downtimeVal', downtime);
+  syncSmoothRuntimeDowntime(runtime, downtime, machineStatus);
   setText('lastUpdateVal', getField(data, ['last_update', 'timestamp_update_terakhir'], '-'));
   setText('warningThresholdVal', getField(settings, ['warning_threshold'], getField(data, ['warning_threshold', 'threshold_warning'], '10.0')));
   setText('criticalThresholdVal', getField(settings, ['critical_threshold'], getField(data, ['critical_threshold', 'threshold_critical'], '20.0')));
