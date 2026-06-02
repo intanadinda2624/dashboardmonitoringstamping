@@ -74,7 +74,6 @@ async function writeLogSafe(dateKey, category, payload) {
   if (typeof writeNumberedFirebaseLog === 'function') {
     return writeNumberedFirebaseLog(dateKey, category, payload);
   }
-  }
   // Fallback kalau firebase-config.js lama belum terganti. Tetap pakai urutan command_000001, dst.
   const safeDate = sanitizeFirebaseKey(dateKey);
   const safeCategory = sanitizeFirebaseKey(category);
