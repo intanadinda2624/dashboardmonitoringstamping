@@ -9,89 +9,131 @@ let cycleLabels = [];
 let pollInterval = null;
 let eventLogLoadedDate = null;
 
-// Smooth display timer: data asli tetap dari ESP32/Firebase, web hanya menghaluskan tampilan.
-// Versi stabil: setelah halaman menerima nilai awal dari Firebase, tampilan berjalan lokal per detik.
-// Update Firebase tidak boleh membuat angka mundur atau meloncat, kecuali tanggal berganti/reset counter.
-let displayRuntimeSec = 0;
-let displayDowntimeSec = 0;
-let displayMachineStatus = 'STOP';
-let displayInitialized = false;
-let displayDateKey = '';
-let displayLastTotalCount = 0;
-let displayLastTickMs = Date.now();
-let displayTimerStarted = false;
 
-function formatSeconds(totalSec) {
+// Smooth display timer: nilai asli tetap dari ESP32/Firebase.
+// Web hanya membuat tampilan runtime/downtime berjalan per detik tanpa menulis balik ke Firebase.
+let smoothRuntimeSec = 0;
+let smoothDowntimeSec = 0;
+let smoothMachineStatus = 'STOP';
+let smoothInitialized = false;
+let smoothDateKey = '';
+let smoothLastTotal = 0;
+let smoothTimerId = null;
+
+function formatSmoothSeconds(totalSec) {
   const sec = Math.max(0, Math.floor(Number(totalSec) || 0));
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
   const s = sec % 60;
-  return String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
+  return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
 }
 
 function renderSmoothRuntimeDowntime() {
   const runtimeEl = document.getElementById('runtimeVal');
   const downtimeEl = document.getElementById('downtimeVal');
-  if (runtimeEl) runtimeEl.innerText = formatSeconds(displayRuntimeSec);
-  if (downtimeEl) downtimeEl.innerText = formatSeconds(displayDowntimeSec);
-}
-
-function tickSmoothRuntimeDowntime() {
-  const now = Date.now();
-  if (!displayInitialized) {
-    displayLastTickMs = now;
-    return;
-  }
-
-  const elapsedSec = Math.floor((now - displayLastTickMs) / 1000);
-  if (elapsedSec <= 0) return;
-
-  displayLastTickMs += elapsedSec * 1000;
-
-  if (displayMachineStatus === 'RUN') {
-    displayRuntimeSec += elapsedSec;
-  } else {
-    displayDowntimeSec += elapsedSec;
-  }
-
-  renderSmoothRuntimeDowntime();
-}
-
-function syncSmoothRuntimeDowntime(runtime, downtime, machineStatus, dateKey, totalCount) {
-  const parsedRuntime = parseTimeToSeconds(runtime);
-  const parsedDowntime = parseTimeToSeconds(downtime);
-  const nextStatus = String(machineStatus || 'STOP').toUpperCase();
-  const nextDateKey = String(dateKey || getDateKey()).replace(/\//g, '-');
-  const nextTotal = parseInt(totalCount, 10) || 0;
-  const resetDetected = displayInitialized && ((displayDateKey && nextDateKey !== displayDateKey) || (nextTotal < displayLastTotalCount));
-
-  if (!displayInitialized || resetDetected) {
-    displayRuntimeSec = parsedRuntime;
-    displayDowntimeSec = parsedDowntime;
-    displayInitialized = true;
-    displayLastTickMs = Date.now();
-  } else {
-    // Jangan pernah mundur. Jangan juga melompat mengikuti data Firebase yang telat/bertumpuk.
-    // Koreksi kecil 0–1 detik masih diizinkan agar tetap sinkron halus.
-    if (parsedRuntime > displayRuntimeSec && parsedRuntime - displayRuntimeSec <= 1) {
-      displayRuntimeSec = parsedRuntime;
-    }
-    if (parsedDowntime > displayDowntimeSec && parsedDowntime - displayDowntimeSec <= 1) {
-      displayDowntimeSec = parsedDowntime;
-    }
-  }
-
-  displayMachineStatus = nextStatus;
-  displayDateKey = nextDateKey;
-  displayLastTotalCount = nextTotal;
-  renderSmoothRuntimeDowntime();
+  if (runtimeEl) runtimeEl.innerText = formatSmoothSeconds(smoothRuntimeSec);
+  if (downtimeEl) downtimeEl.innerText = formatSmoothSeconds(smoothDowntimeSec);
 }
 
 function startSmoothRuntimeDowntimeTimer() {
-  if (displayTimerStarted) return;
-  displayTimerStarted = true;
-  displayLastTickMs = Date.now();
-  setInterval(tickSmoothRuntimeDowntime, 250);
+  if (smoothTimerId) return;
+  smoothTimerId = setInterval(() => {
+    if (!smoothInitialized) return;
+    if (smoothMachineStatus === 'RUN') smoothRuntimeSec += 1;
+    else smoothDowntimeSec += 1;
+    renderSmoothRuntimeDowntime();
+  }, 1000);
+}
+
+function syncSmoothRuntimeDowntime(runtime, downtime, machineStatus, dateKey, totalCount) {
+  const fbRuntime = parseTimeToSeconds(runtime);
+  const fbDowntime = parseTimeToSeconds(downtime);
+  const nextStatus = String(machineStatus || 'STOP').toUpperCase();
+  const nextDate = String(dateKey || getDateKey()).replace(/\//g, '-');
+  const nextTotal = parseInt(totalCount, 10) || 0;
+  const resetDetected = smoothInitialized && ((smoothDateKey && nextDate !== smoothDateKey) || nextTotal < smoothLastTotal);
+
+  if (!smoothInitialized || resetDetected) {
+    smoothRuntimeSec = fbRuntime;
+    smoothDowntimeSec = fbDowntime;
+    smoothInitialized = true;
+  } else {
+    // Jangan pernah mundur karena data Firebase bisa terlambat.
+    // Koreksi besar hanya diambil saat Firebase jauh lebih maju, misalnya web baru aktif lagi setelah lama.
+    if (fbRuntime > smoothRuntimeSec + 10) smoothRuntimeSec = fbRuntime;
+    if (fbDowntime > smoothDowntimeSec + 10) smoothDowntimeSec = fbDowntime;
+  }
+
+  smoothMachineStatus = nextStatus;
+  smoothDateKey = nextDate;
+  smoothLastTotal = nextTotal;
+  renderSmoothRuntimeDowntime();
+}
+
+async function writeLogSafe(dateKey, category, payload) {
+  if (typeof writeNumberedFirebaseLog === 'function') {
+    return writeLogSafe(dateKey, category, payload);
+  }
+  // Fallback kalau firebase-config.js lama belum terganti. Tetap pakai urutan command_000001, dst.
+  const safeDate = sanitizeFirebaseKey(dateKey);
+  const safeCategory = sanitizeFirebaseKey(category);
+  const prefixMap = { login: 'login', command: 'command', settings: 'setting', emergency: 'emergency', manual_mode: 'manual' };
+  const prefix = prefixMap[safeCategory] || safeCategory;
+  const basePath = `stamping_box/logs/${safeDate}/${safeCategory}`;
+  let nextNumber = 1;
+  try {
+    const existing = await FirebaseDB.get(basePath);
+    if (existing && typeof existing === 'object') {
+      const re = new RegExp(`^${prefix}_(\\d+)$`);
+      Object.keys(existing).forEach(k => {
+        const m = k.match(re);
+        if (m) nextNumber = Math.max(nextNumber, parseInt(m[1], 10) + 1);
+      });
+    }
+  } catch (_) {}
+  const logId = `${prefix}_${String(nextNumber).padStart(6, '0')}`;
+  return FirebaseDB.put(`${basePath}/${logId}`, { log_id: logId, log_number: nextNumber, log_category: safeCategory, ...payload });
+}
+
+// Initialize dashboard
+document.addEventListener('DOMContentLoaded', () => {
+  if (!requireAuth()) return;
+  updateNavUser();
+  setupRolePermissions();
+  initCycleChart();
+  startSmoothRuntimeDowntimeTimer();
+  startRealtimeListener();
+});
+
+function getDateKey(date = new Date()) {
+  return date.toLocaleDateString('id-ID', { day:'2-digit', month:'2-digit', year:'numeric' }).replace(/\//g, '-');
+}
+
+function getTimeText(date = new Date()) {
+  return date.toLocaleTimeString('id-ID', { hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false });
+}
+
+function getTimestamp(date = new Date()) {
+  return `${getDateKey(date)} ${getTimeText(date)}`;
+}
+
+function sanitizeFirebaseKey(key) {
+  return String(key || getDateKey()).replace(/[.#$\[\]/]/g, '-');
+}
+
+function getField(obj, names, fallback = '-') {
+  if (!obj) return fallback;
+  for (const name of names) {
+    if (obj[name] !== undefined && obj[name] !== null && obj[name] !== '') return obj[name];
+  }
+  return fallback;
+}
+
+function parseTimeToSeconds(timeStr) {
+  if (!timeStr || timeStr === '-' || timeStr === '00:00:00') return 0;
+  const parts = String(timeStr).split(':').map(v => parseInt(v, 10));
+  if (parts.length !== 3 || parts.some(Number.isNaN)) return 0;
+  return parts[0] * 3600 + parts[1] * 60 + parts[2];
 }
 
 function parseCycleTimeSeconds(value, runtime, total) {
@@ -413,7 +455,7 @@ async function sendCommand(cmd) {
     await FirebaseDB.put('stamping_box/control', commandPayload);
 
     const actionLabel = cmd === 'MASTER_ON' ? 'MASTER ON' : cmd;
-    await writeNumberedFirebaseLog(getDateKey(now), 'command', {
+    await writeLogSafe(getDateKey(now), 'command', {
       timestamp: getTimestamp(now),
       production_date: getDateKey(now),
       production_time: getTimeText(now),
@@ -462,7 +504,7 @@ async function setThresholdAjax(event) {
 
   try {
     await FirebaseDB.put('stamping_box/settings', payload);
-    await writeNumberedFirebaseLog(getDateKey(now), 'settings', {
+    await writeLogSafe(getDateKey(now), 'settings', {
       timestamp: getTimestamp(now),
       production_date: getDateKey(now),
       production_time: getTimeText(now),
@@ -483,4 +525,5 @@ async function setThresholdAjax(event) {
 
 window.addEventListener('beforeunload', () => {
   if (pollInterval) clearInterval(pollInterval);
+  if (smoothTimerId) clearInterval(smoothTimerId);
 });
