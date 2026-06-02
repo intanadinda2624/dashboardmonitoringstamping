@@ -13,88 +13,176 @@ let latestSnapshot = null;
 let dailyReportSnapshot = null;
 let settingsSnapshot = null;
 
-// Smooth display timer untuk runtime/downtime pada halaman histori.
-// Versi stabil: setelah halaman menerima nilai awal dari Firebase, tampilan berjalan lokal per detik.
-// Update Firebase tidak boleh membuat angka mundur atau meloncat, kecuali tanggal berganti/reset counter.
-let historyDisplayRuntimeSec = 0;
-let historyDisplayDowntimeSec = 0;
-let historyDisplayMachineStatus = 'STOP';
-let historyDisplayInitialized = false;
-let historyDisplayDateKey = '';
-let historyDisplayLastTotalCount = 0;
-let historyDisplayLastTickMs = Date.now();
-let historyDisplayTimerStarted = false;
 
-function formatSeconds(totalSec) {
+// Smooth display timer untuk runtime/downtime di halaman histori.
+// Nilai asli tetap dari daily_report/latest; tampilan hanya dilanjutkan lokal agar tidak patah-patah.
+let histSmoothRuntimeSec = 0;
+let histSmoothDowntimeSec = 0;
+let histSmoothMachineStatus = 'STOP';
+let histSmoothInitialized = false;
+let histSmoothDateKey = '';
+let histSmoothLastTotal = 0;
+let histSmoothTimerId = null;
+
+function formatHistSmoothSeconds(totalSec) {
   const sec = Math.max(0, Math.floor(Number(totalSec) || 0));
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
   const s = sec % 60;
-  return String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
+  return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
 }
 
-function renderHistorySmoothRuntimeDowntime() {
+function renderHistSmoothRuntimeDowntime() {
   const runtimeEl = document.getElementById('runtimeHVal');
   const downtimeEl = document.getElementById('downtimeHVal');
-  if (runtimeEl) runtimeEl.innerText = formatSeconds(historyDisplayRuntimeSec);
-  if (downtimeEl) downtimeEl.innerText = formatSeconds(historyDisplayDowntimeSec);
+  if (runtimeEl) runtimeEl.innerText = formatHistSmoothSeconds(histSmoothRuntimeSec);
+  if (downtimeEl) downtimeEl.innerText = formatHistSmoothSeconds(histSmoothDowntimeSec);
 }
 
-function tickHistorySmoothRuntimeDowntime() {
-  const now = Date.now();
-  if (!historyDisplayInitialized) {
-    historyDisplayLastTickMs = now;
-    return;
-  }
+function startHistSmoothRuntimeDowntimeTimer() {
+  if (histSmoothTimerId) return;
+  histSmoothTimerId = setInterval(() => {
+    if (!histSmoothInitialized || activeFilter) return;
+    if (histSmoothMachineStatus === 'RUN') histSmoothRuntimeSec += 1;
+    else histSmoothDowntimeSec += 1;
+    renderHistSmoothRuntimeDowntime();
+  }, 1000);
+}
 
-  const elapsedSec = Math.floor((now - historyDisplayLastTickMs) / 1000);
-  if (elapsedSec <= 0) return;
+function syncHistSmoothRuntimeDowntime(runtime, downtime, machineStatus, dateKey, totalCount) {
+  const fbRuntime = parseTimeToSeconds(runtime);
+  const fbDowntime = parseTimeToSeconds(downtime);
+  const nextStatus = String(machineStatus || 'STOP').toUpperCase();
+  const nextDate = String(dateKey || getDateKey()).replace(/\//g, '-');
+  const nextTotal = parseInt(totalCount, 10) || 0;
+  const resetDetected = histSmoothInitialized && ((histSmoothDateKey && nextDate !== histSmoothDateKey) || nextTotal < histSmoothLastTotal);
 
-  historyDisplayLastTickMs += elapsedSec * 1000;
-
-  if (historyDisplayMachineStatus === 'RUN') {
-    historyDisplayRuntimeSec += elapsedSec;
+  if (!histSmoothInitialized || resetDetected || activeFilter) {
+    histSmoothRuntimeSec = fbRuntime;
+    histSmoothDowntimeSec = fbDowntime;
+    histSmoothInitialized = true;
   } else {
-    historyDisplayDowntimeSec += elapsedSec;
+    if (fbRuntime > histSmoothRuntimeSec + 10) histSmoothRuntimeSec = fbRuntime;
+    if (fbDowntime > histSmoothDowntimeSec + 10) histSmoothDowntimeSec = fbDowntime;
   }
 
-  renderHistorySmoothRuntimeDowntime();
+  histSmoothMachineStatus = nextStatus;
+  histSmoothDateKey = nextDate;
+  histSmoothLastTotal = nextTotal;
+  renderHistSmoothRuntimeDowntime();
 }
 
-function syncHistorySmoothRuntimeDowntime(source, dateKey) {
-  if (!source) return;
-  const parsedRuntime = parseTimeToSeconds(getField(source, ['runtime'], '00:00:00'));
-  const parsedDowntime = parseTimeToSeconds(getField(source, ['downtime'], '00:00:00'));
-  const nextStatus = String(getField(source, ['machine_status', 'status_machine', 'final_machine_status'], 'STOP')).toUpperCase();
-  const nextDateKey = String(dateKey || getField(source, ['production_date'], getDateKey())).replace(/\//g, '-');
-  const nextTotal = parseInt(getField(source, ['total_count', 'total_produksi', 'production_total'], 0), 10) || 0;
-  const resetDetected = historyDisplayInitialized && ((historyDisplayDateKey && nextDateKey !== historyDisplayDateKey) || (nextTotal < historyDisplayLastTotalCount));
+document.addEventListener('DOMContentLoaded', () => {
+  if (!requireAuth()) return;
+  updateNavUser();
+  setupHistoryRole();
+  initHistoryCycleChart();
+  startHistSmoothRuntimeDowntimeTimer();
+  startHistoryListener();
+});
 
-  if (!historyDisplayInitialized || resetDetected) {
-    historyDisplayRuntimeSec = parsedRuntime;
-    historyDisplayDowntimeSec = parsedDowntime;
-    historyDisplayInitialized = true;
-    historyDisplayLastTickMs = Date.now();
+function setupHistoryRole() {
+  const reportSection = document.getElementById('reportSection');
+  const operatorReport = document.getElementById('operatorReport');
+
+  if (canViewReportFull()) {
+    if (reportSection) reportSection.style.display = 'block';
+    if (operatorReport) operatorReport.style.display = 'none';
   } else {
-    if (parsedRuntime > historyDisplayRuntimeSec && parsedRuntime - historyDisplayRuntimeSec <= 1) {
-      historyDisplayRuntimeSec = parsedRuntime;
-    }
-    if (parsedDowntime > historyDisplayDowntimeSec && parsedDowntime - historyDisplayDowntimeSec <= 1) {
-      historyDisplayDowntimeSec = parsedDowntime;
-    }
+    if (reportSection) reportSection.style.display = 'none';
+    if (operatorReport) operatorReport.style.display = 'block';
   }
-
-  historyDisplayMachineStatus = nextStatus;
-  historyDisplayDateKey = nextDateKey;
-  historyDisplayLastTotalCount = nextTotal;
-  renderHistorySmoothRuntimeDowntime();
 }
 
-function startHistorySmoothRuntimeDowntimeTimer() {
-  if (historyDisplayTimerStarted) return;
-  historyDisplayTimerStarted = true;
-  historyDisplayLastTickMs = Date.now();
-  setInterval(tickHistorySmoothRuntimeDowntime, 250);
+function getDateKey(date = new Date()) {
+  return date.toLocaleDateString('id-ID', { day:'2-digit', month:'2-digit', year:'numeric' }).replace(/\//g, '-');
+}
+
+function sanitizeFirebaseKey(key) {
+  return String(key || getDateKey()).replace(/[.#$\[\]/]/g, '-');
+}
+
+function getField(obj, names, fallback = '-') {
+  if (!obj) return fallback;
+  for (const name of names) {
+    if (obj[name] !== undefined && obj[name] !== null && obj[name] !== '') return obj[name];
+  }
+  return fallback;
+}
+
+function getRowDate(row) {
+  if (!row) return '';
+  const date = getField(row, ['production_date', 'tanggal_produksi'], '');
+  if (date) return String(date).replace(/\//g, '-');
+  const ts = getField(row, ['timestamp', 'last_update'], '');
+  const match = String(ts).match(/(\d{2}[-/]\d{2}[-/]\d{4})/);
+  return match ? match[1].replace(/\//g, '-') : '';
+}
+
+function getRowTime(row) {
+  if (!row) return '';
+  const time = getField(row, ['production_time', 'jam_produksi'], '');
+  if (time) {
+    const raw = String(time).trim();
+    return raw.length >= 8 ? raw.slice(0, 8) : raw.slice(0, 5);
+  }
+  const ts = getField(row, ['timestamp', 'last_update'], '');
+  const match = String(ts).match(/(\d{2}:\d{2}:\d{2}|\d{2}:\d{2})/);
+  return match ? match[1] : '';
+}
+
+function parseTimeToSeconds(timeStr) {
+  if (!timeStr || timeStr === '-' || timeStr === '00:00:00') return 0;
+  const parts = String(timeStr).split(':').map(v => parseInt(v, 10));
+  if (parts.length !== 3 || parts.some(Number.isNaN)) return 0;
+  return parts[0] * 3600 + parts[1] * 60 + parts[2];
+}
+
+function parseClockToSeconds(timeStr, endOfMinute = false) {
+  if (!timeStr) return null;
+  const parts = String(timeStr).split(':').map(v => parseInt(v, 10));
+  if (parts.length < 2 || parts.some(Number.isNaN)) return null;
+  const h = parts[0] || 0;
+  const m = parts[1] || 0;
+  let sec = parts.length >= 3 ? (parts[2] || 0) : 0;
+  if (endOfMinute && parts.length === 2) sec = 59;
+  return h * 3600 + m * 60 + sec;
+}
+
+function isNotGoodResult(result) {
+  const r = String(result || '').trim().toUpperCase().replace(/_/g, ' ');
+  return r === 'NOT GOOD' || r === 'NG';
+}
+
+function isGoodResult(result) {
+  const r = String(result || '').trim().toUpperCase().replace(/_/g, ' ');
+  return r === 'GOOD';
+}
+
+function buildEntrySummary(entries, fallbackSource = {}) {
+  const rows = Array.isArray(entries) ? entries : [];
+  if (!rows.length) return fallbackSource || {};
+
+  const good = rows.filter(row => isGoodResult(getField(row, ['result'], ''))).length;
+  const ng = rows.filter(row => isNotGoodResult(getField(row, ['result'], ''))).length;
+  const total = rows.length;
+  const cycles = rows
+    .map(row => parseCycleTimeSeconds(getField(row, ['cycle_time_sec', 'cycle_time_seconds', 'cycle_time'], 0), getField(row, ['runtime'], ''), getField(row, ['total_count', 'total_produksi'], 0)))
+    .filter(value => Number.isFinite(value) && value > 0);
+  const avgCycle = cycles.length ? cycles.reduce((sum, value) => sum + value, 0) / cycles.length : 0;
+  const source = fallbackSource || {};
+
+  return {
+    ...source,
+    production_total: total,
+    good_total: good,
+    ng_total: ng,
+    good_percentage: total > 0 ? ((good * 100) / total).toFixed(1) : '0.0',
+    ng_percentage: total > 0 ? ((ng * 100) / total).toFixed(1) : '0.0',
+    average_cycle_time_sec: avgCycle,
+    warning_count: rows.filter(row => getField(row, ['system_status', 'status_system'], '') === 'WARNING').length,
+    critical_count: rows.filter(row => getField(row, ['system_status', 'status_system'], '') === 'CRITICAL').length
+  };
 }
 
 function parseCycleTimeSeconds(value, runtime, total) {
@@ -261,8 +349,15 @@ function updateHistorySummary(latest, report, entries, dateKey, settings, useFil
   setText('totalProdVal', total);
   setText('pctGoodVal', pctGood);
   setText('pctNGVal', pctNG);
-  // Timer runtime/downtime memakai latest jika tersedia agar tidak tertinggal oleh daily_report yang lebih jarang update.
-  syncHistorySmoothRuntimeDowntime(latest || report || source, dateKey || getDateKey());
+  const runtimeVal = getField(source, ['runtime'], '00:00:00');
+  const downtimeVal = getField(source, ['downtime'], '00:00:00');
+  const machineStatusVal = getField(source, ['final_machine_status', 'machine_status', 'status_machine'], getField(latest || {}, ['machine_status', 'status_machine'], 'STOP'));
+  if (useFilteredSummary) {
+    setText('runtimeHVal', runtimeVal);
+    setText('downtimeHVal', downtimeVal);
+  } else {
+    syncHistSmoothRuntimeDowntime(runtimeVal, downtimeVal, machineStatusVal, dateKey || getDateKey(), total);
+  }
 
   const w = getField(settings, ['warning_threshold'], getField(source, ['warning_threshold', 'threshold_warning'], 10));
   const c = getField(settings, ['critical_threshold'], getField(source, ['critical_threshold', 'threshold_critical'], 20));
@@ -424,4 +519,5 @@ function resetFilter() {
 
 window.addEventListener('beforeunload', () => {
   if (historyPollInterval) clearInterval(historyPollInterval);
+  if (histSmoothTimerId) clearInterval(histSmoothTimerId);
 });
