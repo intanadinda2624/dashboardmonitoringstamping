@@ -10,10 +10,14 @@ let pollInterval = null;
 let eventLogLoadedDate = null;
 
 // Smooth display timer: data asli tetap dari ESP32/Firebase, web hanya menghaluskan tampilan.
-let smoothRuntimeSec = 0;
-let smoothDowntimeSec = 0;
+// Versi monotonic: tampilan tidak boleh mundur karena Firebase/REST kadang telat mengirim nilai lama.
+let smoothRuntimeBaseSec = 0;
+let smoothDowntimeBaseSec = 0;
 let smoothMachineStatus = 'STOP';
+let smoothBaseMs = Date.now();
 let smoothTimerStarted = false;
+let smoothDateKey = '';
+let smoothLastTotalCount = 0;
 
 // Initialize dashboard
 document.addEventListener('DOMContentLoaded', () => {
@@ -65,28 +69,53 @@ function formatSeconds(totalSec) {
   return String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
 }
 
-function renderSmoothRuntimeDowntime() {
-  const runtimeEl = document.getElementById('runtimeVal');
-  const downtimeEl = document.getElementById('downtimeVal');
-  if (runtimeEl) runtimeEl.innerText = formatSeconds(smoothRuntimeSec);
-  if (downtimeEl) downtimeEl.innerText = formatSeconds(smoothDowntimeSec);
+function getSmoothRuntimeDowntimeDisplay() {
+  const elapsed = Math.max(0, Math.floor((Date.now() - smoothBaseMs) / 1000));
+  return {
+    runtime: smoothRuntimeBaseSec + (smoothMachineStatus === 'RUN' ? elapsed : 0),
+    downtime: smoothDowntimeBaseSec + (smoothMachineStatus === 'RUN' ? 0 : elapsed)
+  };
 }
 
-function syncSmoothRuntimeDowntime(runtime, downtime, machineStatus) {
-  smoothRuntimeSec = parseTimeToSeconds(runtime);
-  smoothDowntimeSec = parseTimeToSeconds(downtime);
-  smoothMachineStatus = String(machineStatus || 'STOP').toUpperCase();
+function renderSmoothRuntimeDowntime() {
+  const display = getSmoothRuntimeDowntimeDisplay();
+  const runtimeEl = document.getElementById('runtimeVal');
+  const downtimeEl = document.getElementById('downtimeVal');
+  if (runtimeEl) runtimeEl.innerText = formatSeconds(display.runtime);
+  if (downtimeEl) downtimeEl.innerText = formatSeconds(display.downtime);
+}
+
+function syncSmoothRuntimeDowntime(runtime, downtime, machineStatus, dateKey, totalCount) {
+  const parsedRuntime = parseTimeToSeconds(runtime);
+  const parsedDowntime = parseTimeToSeconds(downtime);
+  const nextStatus = String(machineStatus || 'STOP').toUpperCase();
+  const nextDateKey = String(dateKey || getDateKey()).replace(/\//g, '-');
+  const nextTotal = parseInt(totalCount, 10) || 0;
+  const current = getSmoothRuntimeDowntimeDisplay();
+
+  // Kalau hari berganti atau counter di-reset, nilai boleh turun ke 0.
+  const allowReset = (smoothDateKey && nextDateKey !== smoothDateKey) || (nextTotal < smoothLastTotalCount);
+
+  if (allowReset) {
+    smoothRuntimeBaseSec = parsedRuntime;
+    smoothDowntimeBaseSec = parsedDowntime;
+  } else {
+    // Jika Firebase mengirim nilai lama/terlambat, jangan biarkan tampilan mundur.
+    smoothRuntimeBaseSec = Math.max(parsedRuntime, current.runtime);
+    smoothDowntimeBaseSec = Math.max(parsedDowntime, current.downtime);
+  }
+
+  smoothMachineStatus = nextStatus;
+  smoothDateKey = nextDateKey;
+  smoothLastTotalCount = nextTotal;
+  smoothBaseMs = Date.now();
   renderSmoothRuntimeDowntime();
 }
 
 function startSmoothRuntimeDowntimeTimer() {
   if (smoothTimerStarted) return;
   smoothTimerStarted = true;
-  setInterval(() => {
-    if (smoothMachineStatus === 'RUN') smoothRuntimeSec++;
-    else smoothDowntimeSec++;
-    renderSmoothRuntimeDowntime();
-  }, 1000);
+  setInterval(renderSmoothRuntimeDowntime, 1000);
 }
 
 function parseCycleTimeSeconds(value, runtime, total) {
@@ -233,7 +262,7 @@ function updateDashboardUI(data, settings) {
   setText('totalVal', total);
   setText('percentGoodVal', goodPct);
   setText('percentNGVal', ngPct);
-  syncSmoothRuntimeDowntime(runtime, downtime, machineStatus);
+  syncSmoothRuntimeDowntime(runtime, downtime, machineStatus, getField(data, ['production_date', 'tanggal_produksi'], getDateKey()), total);
   setText('lastUpdateVal', getField(data, ['last_update', 'timestamp_update_terakhir'], '-'));
   setText('warningThresholdVal', getField(settings, ['warning_threshold'], getField(data, ['warning_threshold', 'threshold_warning'], '10.0')));
   setText('criticalThresholdVal', getField(settings, ['critical_threshold'], getField(data, ['critical_threshold', 'threshold_critical'], '20.0')));
